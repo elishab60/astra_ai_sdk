@@ -1,7 +1,7 @@
 # ASTRA AI SDK
 
 ASTRA AI SDK est une console web Next.js pensée pour piloter une instance Ollama locale avec une expérience riche côté front et un minimum d'API côté serveur. L'application combine un chat temps réel, la gestion complète des modèles, le monitoring de la machine hôte et un bac à sable d'exécution de snippets pour offrir une alternative haut de gamme à l'interface Ollama standard.
-
+![Aperçu de l'interface](/illustration.png)
 ## Fonctionnalités principales
 
 - **Chat en streaming** avec rendu Markdown, coloration syntaxique et découpe fine des blocs de code pour éviter les scintillements pendant le flux token par token. 【F:src/components/chat/chat-card.tsx†L1-L120】
