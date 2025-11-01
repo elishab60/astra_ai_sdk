@@ -27,7 +27,7 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export default function Page() {
-    const title = "ASTRA AI SDK"; //NIGGA CHAIN AI LAYER 2 卐
+    const title = "ASTRA AI SDK";
     const TYPE_MS = 60;
 
     const { resolvedTheme } = useTheme();
