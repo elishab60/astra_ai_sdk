@@ -89,7 +89,7 @@ export default function Page() {
         top_p: 0.9,
         top_k: 40,
         repeat_penalty: 1.1,
-        num_predict: 512,
+        num_predict: 2048,
         system: "",
         format: "text",
     });
@@ -101,6 +101,8 @@ export default function Page() {
         "qwen2.5:7b-instruct",
         "deepseek-coder:6.7b",
         "phi3:mini-4k-instruct-q4",
+        "ikiru/dolphin-mistral-24b-venice-edition:latest",
+        "gpt-oss:20b",
     ];
 
     return (

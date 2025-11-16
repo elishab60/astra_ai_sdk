@@ -16,6 +16,7 @@ import {
     FileText,
     Mic,
     Send,
+    X,
 } from "lucide-react";
 import { ndjsonStream } from "@/lib/ndjson";
 import { CodeEditor } from "@/components/ui/shadcn-io/code-editor";
@@ -335,6 +336,9 @@ export function ChatCard({
     const assistantIndexRef = React.useRef<number | null>(null);
     const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
+    // Ajout : ref pour gérer l'annulation de la requête
+    const controllerRef = React.useRef<AbortController | null>(null);
+
     const handleScroll = React.useCallback(() => {
         const el = viewerRef.current;
         if (!el) return;
@@ -394,19 +398,22 @@ export function ChatCard({
         });
         onRunStart?.(text);
 
+        // Création de l'AbortController et stockage
+        const ctrl = new AbortController();
+        controllerRef.current = ctrl;
+
         try {
             const res = await fetch("/api/ollama/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: ctrl.signal,
                 body: JSON.stringify({
                     model,
                     messages: [
                         ...messages.map((m) => ({ role: m.role, content: m.content })),
                         { role: "user", content: text },
                     ],
-                    // on envoie les options du popover
                     options: generationOptions,
-                    // on envoie aussi séparément le system s’il existe → la route le placera en premier
                     system: generationOptions?.system,
                 }),
             });
@@ -445,20 +452,35 @@ export function ChatCard({
                     });
                 }
             }
-        } catch (e) {
+        } catch (e: any) {
+            // Si l'erreur provient d'un abort on affiche un message dédié
+            const aborted = e?.name === "AbortError";
             setMessages((prev) => {
                 const idx = assistantIndexRef.current;
                 if (idx == null || idx < 0 || idx >= prev.length) return prev;
                 const copy = [...prev];
                 copy[idx] = {
                     ...copy[idx],
-                    content: "Erreur: impossible de joindre le modèle.",
+                    content: aborted
+                        ? "Génération arrêtée."
+                        : "Erreur: impossible de joindre le modèle.",
                 };
                 return copy;
             });
         } finally {
+            // nettoyage
+            controllerRef.current = null;
             setStreaming(false);
             onRunEnd?.(Date.now() - startedAt);
+        }
+    }
+
+    // Nouvelle fonction pour arrêter la génération en cours
+    function stopGeneration() {
+        if (controllerRef.current) {
+            controllerRef.current.abort();
+            // on met streaming à false immédiatement pour update UI (le catch gérera le message)
+            setStreaming(false);
         }
     }
 
@@ -466,6 +488,8 @@ export function ChatCard({
         e.preventDefault();
         const text = input.trim();
         if (!text) return;
+        // Respecte l'ancien comportement: si streaming et pas expandé on bloque
+        if (streaming && !expanded) return;
         setInput("");
         void send(text);
     }
@@ -473,6 +497,8 @@ export function ChatCard({
     function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
+            // idem : bloque si streaming et pas expandé
+            if (streaming && !expanded) return;
             const text = input.trim();
             if (!text) return;
             setInput("");
@@ -599,19 +625,61 @@ export function ChatCard({
                         }
                     />
 
-                    <Button
-                        type="submit"
-                        disabled={streaming && !expanded}
-                        className={
-                            isDark
-                                ? "h-10 shrink-0 rounded-full border-white/10 bg-white/10 text-white hover:bg-white/15"
-                                : "h-10 shrink-0 rounded-full border-slate-200 bg-slate-900 text-white hover:bg-slate-800"
-                        }
-                        variant={isDark ? "outline" : "default"}
-                    >
-                        <Send className="mr-2 h-4 w-4" />
-                        Envoyer
-                    </Button>
+                    {streaming ? (
+                        // Bouton "Arrêter" pendant une génération en cours
+                        <Button
+                            type="button"
+                            onClick={stopGeneration}
+                            className={
+                                isDark
+                                    ? "h-10 shrink-0 rounded-full border-white/10 bg-red-600/10 text-white hover:bg-red-600/15"
+                                    : "h-10 shrink-0 rounded-full border-slate-200 bg-red-50 text-red-700 hover:bg-red-100"
+                            }
+                            variant={isDark ? "outline" : "ghost"}
+                        >
+                            {/* Spinner tant que pas de premier token, sinon icône X */}
+                            {streaming && !firstTokenSeen ? (
+                                <svg
+                                    className="animate-spin mr-2 h-4 w-4 text-white/90"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    fill="none"
+                                    viewBox="0 0 24 24"
+                                >
+                                    <circle
+                                        className="opacity-25"
+                                        cx="12"
+                                        cy="12"
+                                        r="10"
+                                        stroke="currentColor"
+                                        strokeWidth="4"
+                                    />
+                                    <path
+                                        className="opacity-75"
+                                        fill="currentColor"
+                                        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+                                    />
+                                </svg>
+                            ) : (
+                                <X className="mr-2 h-4 w-4" />
+                            )}
+                            Arrêter
+                        </Button>
+                    ) : (
+                        // Bouton Envoyer habituel
+                        <Button
+                            type="submit"
+                            disabled={streaming && !expanded}
+                            className={
+                                isDark
+                                    ? "h-10 shrink-0 rounded-full border-white/10 bg-white/10 text-white hover:bg-white/15"
+                                    : "h-10 shrink-0 rounded-full border-slate-200 bg-slate-900 text-white hover:bg-slate-800"
+                            }
+                            variant={isDark ? "outline" : "default"}
+                        >
+                            <Send className="mr-2 h-4 w-4" />
+                            Envoyer
+                        </Button>
+                    )}
                 </form>
             </CardFooter>
         </Card>

@@ -27,9 +27,9 @@ export function GradientBackground() {
             <GrainGradient
                 style={{ height: "100%", width: "100%", transition: "all 600ms linear" }}
                 colorBack={isDark ? "hsl(0, 0%, 0%)" : "hsl(0, 0%, 100%)"}
-                softness={0.75}
-                intensity={0.45}
-                noise={0.02}
+                softness={0.65}
+                intensity={0.55}
+                noise={0.34}
                 shape="corners"
                 offsetX={0}
                 offsetY={0}
