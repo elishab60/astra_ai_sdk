@@ -3,6 +3,16 @@ const OLLAMA = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
 
 export type OllamaModel = { name: string; size?: number; details?: { parameter_size?: string; } };
 
+export type OllamaMessage = {
+    role: "user" | "assistant" | "system";
+    content:
+        | string
+        | Array<
+            | { type: "text"; text: string }
+            | { type: "image"; image: string }
+        >;
+};
+
 export async function listLocalModels() {
     const r = await fetch(`${OLLAMA}/api/tags`, { cache: "no-store" });
     if (!r.ok) throw new Error("/api/tags failed");
@@ -38,8 +48,8 @@ export async function ensureModel(name: string) {
 
 export async function chatStream(payload: {
     model: string;
-    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
-    options?: Record<string, any>;
+    messages: OllamaMessage[];
+    options?: Record<string, unknown>;
 }) {
     const r = await fetch(`${OLLAMA}/api/chat`, {
         method: "POST",
