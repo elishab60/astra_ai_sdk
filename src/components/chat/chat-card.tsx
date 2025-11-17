@@ -69,6 +69,15 @@ function serializeMessage(msg: Msg) {
     return { role: msg.role, content: parts };
 }
 
+function getErrorMessage(error: unknown) {
+    if (typeof error === "string") return error;
+    if (typeof error === "object" && error && "message" in error) {
+        const maybeMessage = (error as { message?: unknown }).message;
+        if (typeof maybeMessage === "string") return maybeMessage;
+    }
+    return "";
+}
+
 async function fileToAttachment(file: File): Promise<Attachment> {
     const dataUrl: string = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -255,8 +264,7 @@ function TextBubble({
                             {...props}
                         />
                     ),
-                    code(props) {
-                        const { children, className, ...rest } = props as any;
+                    code({ children, className, ...rest }: React.ComponentPropsWithoutRef<"code">) {
                         const match = /language-(\w+)/.exec(className || "");
                         return match ? (
                             <pre
@@ -428,6 +436,7 @@ export function ChatCard({
     }
 
     function removeAttachment(id: string) {
+        console.debug?.("[ChatCard] removeAttachment", id);
         setPendingAttachments((prev) => prev.filter((att) => att.id !== id));
     }
 
@@ -436,6 +445,16 @@ export function ChatCard({
         if (!files?.length) return;
         const intent = fileIntentRef.current;
         fileIntentRef.current = null;
+
+        console.debug?.("[ChatCard] files selected", {
+            intent,
+            count: files.length,
+            names: Array.from(files).map((file) => ({
+                name: file.name,
+                type: file.type,
+                size: file.size,
+            })),
+        });
 
         if (intent !== "image") {
             const names = Array.from(files)
@@ -454,6 +473,7 @@ export function ChatCard({
             try {
                 const attachment = await fileToAttachment(file);
                 attachments.push(attachment);
+                console.debug?.("[ChatCard] attachment ready", attachment);
             } catch (err) {
                 console.error(err);
             }
@@ -464,10 +484,15 @@ export function ChatCard({
             return;
         }
 
-        setPendingAttachments((prev) => [...prev, ...attachments]);
+        setPendingAttachments((prev) => {
+            const next = [...prev, ...attachments];
+            console.debug?.("[ChatCard] pending attachments", next);
+            return next;
+        });
     }
 
     async function send(text: string) {
+        console.debug?.("[ChatCard] send() invoked", { text, hasAttachments: pendingAttachments.length > 0 });
         if (!model) {
             alert("Choisis d’abord un modèle.");
             return;
@@ -500,28 +525,51 @@ export function ChatCard({
         const ctrl = new AbortController();
         controllerRef.current = ctrl;
 
+        const serializedMessages = [
+            ...messages.map((m) => serializeMessage(m)),
+            serializeMessage(userMessage),
+        ];
+
+        const payload = {
+            model,
+            messages: serializedMessages,
+            options: generationOptions,
+            system: generationOptions?.system,
+        };
+
+        if (typeof console.groupCollapsed === "function" && typeof console.groupEnd === "function") {
+            console.groupCollapsed("[ChatCard] outgoing payload");
+            console.debug("[ChatCard] payload", payload);
+            console.debug("[ChatCard] model", model);
+            console.debug("[ChatCard] pending attachments count", attachments.length);
+            console.debug("[ChatCard] serialized messages", serializedMessages);
+            console.groupEnd();
+        } else {
+            console.debug?.("[ChatCard] payload", payload);
+        }
+
         try {
             const res = await fetch("/api/ollama/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 signal: ctrl.signal,
-                body: JSON.stringify({
-                    model,
-                    messages: [
-                        ...messages.map((m) => serializeMessage(m)),
-                        serializeMessage(userMessage),
-                    ],
-                    options: generationOptions,
-                    system: generationOptions?.system,
-                }),
+                body: JSON.stringify(payload),
             });
-            if (!res.ok || !res.body) throw new Error("Chat failed");
+
+            console.debug?.("[ChatCard] /api/ollama/chat status", res.status, res.statusText);
+
+            if (!res.ok || !res.body) {
+                const errText = await res.text().catch(() => "");
+                console.error("[ChatCard] upstream error", errText);
+                throw new Error(errText || `Chat failed (${res.status})`);
+            }
 
             let first = true;
             let acc = "";
             let scheduled = false;
 
             for await (const evt of ndjsonStream(res.body)) {
+                console.debug?.("[ChatCard] NDJSON event", evt);
                 const delta = evt?.message?.content ?? "";
                 if (!delta) continue;
 
@@ -550,9 +598,10 @@ export function ChatCard({
                     });
                 }
             }
-        } catch (e: any) {
+        } catch (e: unknown) {
+            console.error("[ChatCard] send() failed", e);
             // Si l'erreur provient d'un abort on affiche un message dédié
-            const aborted = e?.name === "AbortError";
+            const aborted = typeof e === "object" && e instanceof DOMException && e.name === "AbortError";
             setMessages((prev) => {
                 const idx = assistantIndexRef.current;
                 if (idx == null || idx < 0 || idx >= prev.length) return prev;
@@ -561,7 +610,10 @@ export function ChatCard({
                     ...copy[idx],
                     content: aborted
                         ? "Génération arrêtée."
-                        : "Erreur: impossible de joindre le modèle.",
+                        : `Erreur: impossible de joindre le modèle. ${(() => {
+                              const details = getErrorMessage(e);
+                              return details ? `Détails: ${details}` : "";
+                          })()}`,
                 };
                 return copy;
             });
@@ -575,6 +627,7 @@ export function ChatCard({
 
     // Nouvelle fonction pour arrêter la génération en cours
     function stopGeneration() {
+        console.debug?.("[ChatCard] stopGeneration()");
         if (controllerRef.current) {
             controllerRef.current.abort();
             // on met streaming à false immédiatement pour update UI (le catch gérera le message)
