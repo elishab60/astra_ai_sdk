@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +30,73 @@ import "highlight.js/styles/github-dark.css";
    Types
 ------------------------------------------------------- */
 
-type Msg = { id: string; role: "user" | "assistant"; content: string };
+type Attachment = {
+    id: string;
+    kind: "image";
+    name: string;
+    dataUrl: string;
+    base64: string;
+};
+
+type Msg = {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    attachments?: Attachment[];
+};
+
+type OllamaContentPart =
+    | { type: "text"; text: string }
+    | { type: "image"; image: string };
+
+function serializeMessage(msg: Msg) {
+    if (!msg.attachments?.length) {
+        return { role: msg.role, content: msg.content };
+    }
+
+    const parts: OllamaContentPart[] = [];
+
+    if (msg.content.trim()) {
+        parts.push({ type: "text", text: msg.content });
+    }
+
+    for (const attachment of msg.attachments) {
+        parts.push({ type: "image", image: attachment.base64 });
+    }
+
+    // Ollama attend un tableau quand il y a des images.
+    // S'il n'y a pas de texte, on envoie uniquement les parties image.
+    return { role: msg.role, content: parts };
+}
+
+function getErrorMessage(error: unknown) {
+    if (typeof error === "string") return error;
+    if (typeof error === "object" && error && "message" in error) {
+        const maybeMessage = (error as { message?: unknown }).message;
+        if (typeof maybeMessage === "string") return maybeMessage;
+    }
+    return "";
+}
+
+async function fileToAttachment(file: File): Promise<Attachment> {
+    const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+
+    const [, base64 = ""] = dataUrl.split(",");
+    if (!base64) throw new Error("Impossible de lire le fichier");
+
+    return {
+        id: crypto.randomUUID(),
+        kind: "image",
+        name: file.name,
+        dataUrl,
+        base64,
+    };
+}
 
 type GenerationOptions = {
     temperature?: number;
@@ -197,8 +264,7 @@ function TextBubble({
                             {...props}
                         />
                     ),
-                    code(props) {
-                        const { children, className, ...rest } = props as any;
+                    code({ children, className, ...rest }: React.ComponentPropsWithoutRef<"code">) {
                         const match = /language-(\w+)/.exec(className || "");
                         return match ? (
                             <pre
@@ -330,11 +396,13 @@ export function ChatCard({
     const [expanded, setExpanded] = React.useState(false);
     const [firstTokenSeen, setFirstTokenSeen] = React.useState(false);
     const [streaming, setStreaming] = React.useState(false);
+    const [pendingAttachments, setPendingAttachments] = React.useState<Attachment[]>([]);
 
     const viewerRef = React.useRef<HTMLDivElement | null>(null);
     const stickToBottomRef = React.useRef(true);
     const assistantIndexRef = React.useRef<number | null>(null);
     const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+    const fileIntentRef = React.useRef<"image" | "file" | "audio" | null>(null);
 
     // Ajout : ref pour gérer l'annulation de la requête
     const controllerRef = React.useRef<AbortController | null>(null);
@@ -357,42 +425,97 @@ export function ChatCard({
         scrollToBottomIfNeeded();
     }, [messages.length, scrollToBottomIfNeeded]);
 
-    function openFileDialog(accept?: string) {
+    function openFileDialog(accept?: string, kind?: "image" | "file" | "audio") {
         const el = fileInputRef.current;
         if (!el) return;
+        fileIntentRef.current = kind ?? null;
         el.value = "";
         if (accept) el.accept = accept;
         else el.removeAttribute("accept");
         el.click();
     }
 
-    function onFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    function removeAttachment(id: string) {
+        console.debug?.("[ChatCard] removeAttachment", id);
+        setPendingAttachments((prev) => prev.filter((att) => att.id !== id));
+    }
+
+    async function onFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
         const files = e.target.files;
         if (!files?.length) return;
-        const names = Array.from(files)
-            .map((f) => f.name)
-            .join(", ");
-        setMessages((prev) => [
-            ...prev,
-            { id: crypto.randomUUID(), role: "user", content: `📎 ${names}` },
-        ]);
+        const intent = fileIntentRef.current;
+        fileIntentRef.current = null;
+
+        console.debug?.("[ChatCard] files selected", {
+            intent,
+            count: files.length,
+            names: Array.from(files).map((file) => ({
+                name: file.name,
+                type: file.type,
+                size: file.size,
+            })),
+        });
+
+        if (intent !== "image") {
+            const names = Array.from(files)
+                .map((f) => f.name)
+                .join(", ");
+            setMessages((prev) => [
+                ...prev,
+                { id: crypto.randomUUID(), role: "user", content: `📎 ${names}` },
+            ]);
+            return;
+        }
+
+        const attachments: Attachment[] = [];
+        for (const file of Array.from(files)) {
+            if (!file.type.startsWith("image/")) continue;
+            try {
+                const attachment = await fileToAttachment(file);
+                attachments.push(attachment);
+                console.debug?.("[ChatCard] attachment ready", attachment);
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        if (!attachments.length) {
+            alert("Impossible de lire les images sélectionnées.");
+            return;
+        }
+
+        setPendingAttachments((prev) => {
+            const next = [...prev, ...attachments];
+            console.debug?.("[ChatCard] pending attachments", next);
+            return next;
+        });
     }
 
     async function send(text: string) {
+        console.debug?.("[ChatCard] send() invoked", { text, hasAttachments: pendingAttachments.length > 0 });
         if (!model) {
             alert("Choisis d’abord un modèle.");
             return;
         }
+        if (!text.trim() && pendingAttachments.length === 0) {
+            return;
+        }
         setStreaming(true);
         const startedAt = Date.now();
+        const attachments = pendingAttachments;
+        setPendingAttachments([]);
+
+        const userMessage: Msg = {
+            id: crypto.randomUUID(),
+            role: "user",
+            content: text,
+            attachments: attachments.length ? attachments : undefined,
+        };
+        const assistantMessage: Msg = { id: crypto.randomUUID(), role: "assistant", content: "" };
 
         // on rajoute le message user + un message assistant vide
         setMessages((prev) => {
-            const next = [
-                ...prev,
-                { id: crypto.randomUUID(), role: "user", content: text },
-                { id: crypto.randomUUID(), role: "assistant", content: "" },
-            ] as Msg[];
+            const next = [...prev, userMessage, assistantMessage];
             assistantIndexRef.current = next.length - 1;
             return next;
         });
@@ -402,28 +525,51 @@ export function ChatCard({
         const ctrl = new AbortController();
         controllerRef.current = ctrl;
 
+        const serializedMessages = [
+            ...messages.map((m) => serializeMessage(m)),
+            serializeMessage(userMessage),
+        ];
+
+        const payload = {
+            model,
+            messages: serializedMessages,
+            options: generationOptions,
+            system: generationOptions?.system,
+        };
+
+        if (typeof console.groupCollapsed === "function" && typeof console.groupEnd === "function") {
+            console.groupCollapsed("[ChatCard] outgoing payload");
+            console.debug("[ChatCard] payload", payload);
+            console.debug("[ChatCard] model", model);
+            console.debug("[ChatCard] pending attachments count", attachments.length);
+            console.debug("[ChatCard] serialized messages", serializedMessages);
+            console.groupEnd();
+        } else {
+            console.debug?.("[ChatCard] payload", payload);
+        }
+
         try {
             const res = await fetch("/api/ollama/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 signal: ctrl.signal,
-                body: JSON.stringify({
-                    model,
-                    messages: [
-                        ...messages.map((m) => ({ role: m.role, content: m.content })),
-                        { role: "user", content: text },
-                    ],
-                    options: generationOptions,
-                    system: generationOptions?.system,
-                }),
+                body: JSON.stringify(payload),
             });
-            if (!res.ok || !res.body) throw new Error("Chat failed");
+
+            console.debug?.("[ChatCard] /api/ollama/chat status", res.status, res.statusText);
+
+            if (!res.ok || !res.body) {
+                const errText = await res.text().catch(() => "");
+                console.error("[ChatCard] upstream error", errText);
+                throw new Error(errText || `Chat failed (${res.status})`);
+            }
 
             let first = true;
             let acc = "";
             let scheduled = false;
 
             for await (const evt of ndjsonStream(res.body)) {
+                console.debug?.("[ChatCard] NDJSON event", evt);
                 const delta = evt?.message?.content ?? "";
                 if (!delta) continue;
 
@@ -452,9 +598,10 @@ export function ChatCard({
                     });
                 }
             }
-        } catch (e: any) {
+        } catch (e: unknown) {
+            console.error("[ChatCard] send() failed", e);
             // Si l'erreur provient d'un abort on affiche un message dédié
-            const aborted = e?.name === "AbortError";
+            const aborted = typeof e === "object" && e instanceof DOMException && e.name === "AbortError";
             setMessages((prev) => {
                 const idx = assistantIndexRef.current;
                 if (idx == null || idx < 0 || idx >= prev.length) return prev;
@@ -463,7 +610,10 @@ export function ChatCard({
                     ...copy[idx],
                     content: aborted
                         ? "Génération arrêtée."
-                        : "Erreur: impossible de joindre le modèle.",
+                        : `Erreur: impossible de joindre le modèle. ${(() => {
+                              const details = getErrorMessage(e);
+                              return details ? `Détails: ${details}` : "";
+                          })()}`,
                 };
                 return copy;
             });
@@ -477,6 +627,7 @@ export function ChatCard({
 
     // Nouvelle fonction pour arrêter la génération en cours
     function stopGeneration() {
+        console.debug?.("[ChatCard] stopGeneration()");
         if (controllerRef.current) {
             controllerRef.current.abort();
             // on met streaming à false immédiatement pour update UI (le catch gérera le message)
@@ -487,7 +638,7 @@ export function ChatCard({
     function onSubmit(e: React.FormEvent) {
         e.preventDefault();
         const text = input.trim();
-        if (!text) return;
+        if (!text && pendingAttachments.length === 0) return;
         // Respecte l'ancien comportement: si streaming et pas expandé on bloque
         if (streaming && !expanded) return;
         setInput("");
@@ -500,7 +651,7 @@ export function ChatCard({
             // idem : bloque si streaming et pas expandé
             if (streaming && !expanded) return;
             const text = input.trim();
-            if (!text) return;
+            if (!text && pendingAttachments.length === 0) return;
             setInput("");
             void send(text);
         }
@@ -554,6 +705,38 @@ export function ChatCard({
                                     }
                                 >
                                     {m.content}
+                                    {m.attachments?.length ? (
+                                        <div className="mt-3 flex flex-wrap gap-3">
+                                            {m.attachments.map((attachment) => (
+                                                <div
+                                                    key={attachment.id}
+                                                    className={
+                                                        isDark
+                                                            ? "overflow-hidden rounded-xl border border-white/10 bg-black/40"
+                                                            : "overflow-hidden rounded-xl border border-slate-200 bg-white"
+                                                    }
+                                                >
+                                                    <Image
+                                                        src={attachment.dataUrl}
+                                                        alt={attachment.name}
+                                                        width={96}
+                                                        height={96}
+                                                        className="h-24 w-24 object-cover"
+                                                        unoptimized
+                                                    />
+                                                    <p
+                                                        className={
+                                                            isDark
+                                                                ? "px-2 py-1 text-[11px] text-white/70"
+                                                                : "px-2 py-1 text-[11px] text-slate-600"
+                                                        }
+                                                    >
+                                                        {attachment.name}
+                                                    </p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : null}
                                 </div>
                             )}
                         </div>
@@ -591,15 +774,15 @@ export function ChatCard({
                                     : "border-slate-200 bg-white text-slate-900 rounded-xl"
                             }
                         >
-                            <DropdownMenuItem onClick={() => openFileDialog("image/*")}>
+                            <DropdownMenuItem onClick={() => openFileDialog("image/*", "image")}>
                                 <ImageIcon className="mr-2 h-4 w-4" /> Photo
                             </DropdownMenuItem>
                             <DropdownMenuItem
-                                onClick={() => openFileDialog(".pdf,.txt,.md,.doc,.docx")}
+                                onClick={() => openFileDialog(".pdf,.txt,.md,.doc,.docx", "file")}
                             >
                                 <FileText className="mr-2 h-4 w-4" /> Fichier
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => openFileDialog("audio/*")}>
+                            <DropdownMenuItem onClick={() => openFileDialog("audio/*", "audio")}>
                                 <Mic className="mr-2 h-4 w-4" /> Audio
                             </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -613,17 +796,63 @@ export function ChatCard({
                         onChange={onFilesSelected}
                     />
 
-                    <Input
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={onKeyDown}
-                        placeholder="Écris ton prompt ici…"
-                        className={
-                            isDark
-                                ? "h-10 flex-1 rounded-full border-white/10 bg-white/5 text-white placeholder:text-white/40 focus-visible:ring-white/20"
-                                : "h-10 flex-1 rounded-full border-slate-200 bg-white text-slate-900 placeholder:text-slate-400 focus-visible:ring-slate-200"
-                        }
-                    />
+                    <div className="flex flex-1 flex-col gap-2">
+                        {pendingAttachments.length > 0 ? (
+                            <div className="flex flex-wrap gap-2">
+                                {pendingAttachments.map((attachment) => (
+                                    <div
+                                        key={attachment.id}
+                                        className={
+                                            isDark
+                                                ? "relative overflow-hidden rounded-2xl border border-white/10 bg-black/40"
+                                                : "relative overflow-hidden rounded-2xl border border-slate-200 bg-white"
+                                        }
+                                    >
+                                        <Image
+                                            src={attachment.dataUrl}
+                                            alt={attachment.name}
+                                            width={96}
+                                            height={80}
+                                            className="h-20 w-24 object-cover"
+                                            unoptimized
+                                        />
+                                        <div
+                                            className={
+                                                isDark
+                                                    ? "flex items-center justify-between px-2 py-1 text-[11px] text-white/70"
+                                                    : "flex items-center justify-between px-2 py-1 text-[11px] text-slate-600"
+                                            }
+                                        >
+                                            <span className="max-w-[85px] truncate pr-2">{attachment.name}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => removeAttachment(attachment.id)}
+                                                className={
+                                                    isDark
+                                                        ? "rounded-full border border-white/10 p-1 text-white/70 hover:bg-white/10"
+                                                        : "rounded-full border border-slate-200 p-1 text-slate-600 hover:bg-slate-100"
+                                                }
+                                                aria-label="Retirer l'image"
+                                            >
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : null}
+                        <Input
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={onKeyDown}
+                            placeholder="Écris ton prompt ici…"
+                            className={
+                                isDark
+                                    ? "h-10 flex-1 rounded-full border-white/10 bg-white/5 text-white placeholder:text-white/40 focus-visible:ring-white/20"
+                                    : "h-10 flex-1 rounded-full border-slate-200 bg-white text-slate-900 placeholder:text-slate-400 focus-visible:ring-slate-200"
+                            }
+                        />
+                    </div>
 
                     {streaming ? (
                         // Bouton "Arrêter" pendant une génération en cours
